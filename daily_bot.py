@@ -1,49 +1,48 @@
-
-import schedule, time, csv, os, random
+"""
+daily_bot.py - Picks one village per day and publishes
+Fixed to work with publisher.py and new secrets
+"""
+import csv
+import os
+from datetime import datetime
 from generator import generate_infographic, verify_village
-from publisher import create_caption, publish_image
+from publisher import publish_image, create_caption
 
-STATE_FILE = "last_posted.txt"
-
-def get_next_village():
-    with open('villages_database.csv', encoding='utf-8') as f:
+def pick_village_of_the_day():
+    csv_path = "villages_database.csv"
+    with open(csv_path, encoding='utf-8') as f:
         villages = list(csv.DictReader(f))
-    # track last posted
-    last_id = None
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as sf:
-            last_id = sf.read().strip()
-    # chronological order: 1947-49 first, then 1967, then ongoing
-    # simple: next after last_id
-    if not last_id:
-        return villages[0], 1
-    for idx, v in enumerate(villages):
-        if v['id'] == last_id:
-            next_idx = (idx+1) % len(villages)
-            return villages[next_idx], next_idx+1
-    return villages[0], 1
+    
+    verified = []
+    for v in villages:
+        ok, _ = verify_village(v)
+        if ok:
+            verified.append(v)
+    
+    if not verified:
+        raise Exception("No verified villages")
 
-def daily_job():
-    village, idx = get_next_village()
-    ok, msg = verify_village(village)
-    if not ok:
-        print(f"Verification failed for {village['id']}: {msg}")
-        return
-    with open('villages_database.csv', encoding='utf-8') as f:
-        total = sum(1 for _ in f) -1
-    path = generate_infographic(village, "output")
-    caption = create_caption(village, idx, total)
-    result = publish_image(path, caption)
-    if result.get('dry_run') or result.get('status')!='error':
-        with open(STATE_FILE,'w') as sf:
-            sf.write(village['id'])
-        print(f"Posted {village['id']}")
-
-schedule.every().day.at("19:00").do(daily_job) # 19:00 Amman time
+    day_of_year = datetime.utcnow().timetuple().tm_yday
+    index = day_of_year % len(verified)
+    total = len(verified)
+    village = verified[index]
+    print(f"Day {day_of_year}: {index+1}/{total} - {village['name_en']} ({village['id']})")
+    return village, index+1, total
 
 if __name__ == "__main__":
-    print("Bot running - will post daily at 19:00 Asia/Amman")
-    daily_job() # run once now
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+    os.makedirs("output", exist_ok=True)
+    village, idx, total = pick_village_of_the_day()
+    image_path = generate_infographic(village, "output")
+    print(f"Generated {image_path}")
+    caption = create_caption(village, idx, total)
+    result = publish_image(image_path, caption)
+    print(f"Result: {result}")
+    if result.get("success"):
+        print("✅ Published!")
+    elif result.get("dry_run"):
+        print("Dry run - add secrets in GitHub to publish for real")
+    else:
+        print(f"❌ Failed {result}")
+        exit(1)
+
+

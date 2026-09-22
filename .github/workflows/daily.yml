@@ -1,0 +1,45 @@
+name: Palestine Archive Daily Publisher
+
+on:
+  schedule:
+    # Every day at 08:00 UTC = 11:00 Palestine time
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      village_id:
+        description: 'Optional specific village ID to publish (leave empty for today auto)'
+        required: false
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          pip install requests pillow
+
+      - name: Generate and Publish
+        env:
+          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+        run: |
+          python daily_bot.py
+
+      - name: Upload generated images as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infographics
+          path: output/*.jpg
+          retention-days: 7
