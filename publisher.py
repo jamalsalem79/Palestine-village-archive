@@ -1,7 +1,7 @@
 """
-Instagram Publisher - FIXED v5
+Instagram + Facebook Page Publisher - v6 DUAL POST
+Posts to both IG and Facebook Page 61594819077642 - Palestine Archive
 Fixes Unknown Image Format by using Imgur + GitHub Raw as host
-GitHub Actions IP is blocked by catbox and 0x0, so we push to repo itself
 """
 import os
 import time
@@ -48,10 +48,6 @@ def upload_transfer(image_path):
     return None
 
 def upload_github_raw(image_path):
-    """
-    Ultimate fallback: commit image to repo and use raw.githubusercontent.com URL
-    This URL is 100% readable by Instagram Graph API
-    """
     try:
         filename = os.path.basename(image_path)
         dest_dir = "output"
@@ -60,14 +56,12 @@ def upload_github_raw(image_path):
         if os.path.abspath(image_path) != os.path.abspath(dest):
             shutil.copy(image_path, dest)
             print(f"Copied {image_path} -> {dest}")
-
         subprocess.run(["git", "config", "--global", "user.email", "bot@palestine.archive"], check=True)
         subprocess.run(["git", "config", "--global", "user.name", "Archive Bot"], check=True)
         subprocess.run(["git", "add", dest], check=True)
         subprocess.run(["git", "commit", "-m", f"publish image {filename} {int(time.time())} [skip ci]"], check=False)
         subprocess.run(["git", "push"], check=True)
         print("Pushed image to GitHub")
-
         repo = os.getenv("GITHUB_REPOSITORY", "jamalsalem79/Palestine-village-archive")
         url = f"https://raw.githubusercontent.com/{repo}/main/{dest}?t={int(time.time())}"
         print(f"GitHub raw URL: {url}")
@@ -113,30 +107,68 @@ This archive preserves the memory of destroyed villages so they are not erased.
 """
     return caption[:2200]
 
+def publish_to_facebook_page(image_url, caption, fb_page_id, fb_token):
+    """Publish same image to Facebook Page"""
+    if not fb_page_id or not fb_token:
+        print("FB Page ID or Token missing - skipping FB Page post")
+        return {"skipped": True}
+    try:
+        print(f"Publishing to Facebook Page {fb_page_id}...")
+        url = f"{GRAPH_BASE}/{fb_page_id}/photos"
+        data = {
+            "url": image_url,
+            "message": caption,
+            "access_token": fb_token
+        }
+        r = requests.post(url, data=data, timeout=60)
+        print(f"FB Page Publish: {r.status_code} {r.text[:1000]}")
+        res = r.json()
+        if "id" in res:
+            print(f"✅ FB Page posted: {res['id']}")
+            return {"success": True, "post_id": res["id"]}
+        else:
+            print(f"❌ FB Page failed: {res}")
+            return {"error": res}
+    except Exception as e:
+        print(f"FB Page exception: {e}")
+        return {"error": str(e)}
+
 def publish_image(image_path_or_url, caption):
     ig_user_id = (os.getenv("IG_USER_ID") or os.getenv("INSTAGRAM_USER_ID") or "").strip().strip('"').strip("'")
     token = (os.getenv("ACCESS_TOKEN") or os.getenv("INSTAGRAM_ACCESS_TOKEN") or "").strip().strip('"').strip("'")
+    
+    # Facebook Page config - ID 61594819077642 - Palestine Archive
+    fb_page_id = (os.getenv("FB_PAGE_ID") or "61594819077642").strip()
+    fb_page_token = (os.getenv("FB_PAGE_TOKEN") or os.getenv("FACEBOOK_PAGE_TOKEN") or token).strip().strip('"').strip("'")
+    
     print(f"DEBUG: IG_USER_ID length={len(ig_user_id)} value={ig_user_id[:10]}...")
     print(f"DEBUG: ACCESS_TOKEN length={len(token)} starts_with={token[:10]}...")
+    print(f"DEBUG: FB_PAGE_ID={fb_page_id} FB_TOKEN length={len(fb_page_token)}")
+    
     if not ig_user_id or not token:
         return {"dry_run": True}
     if len(token) < 50:
         print(f"ERROR: Token too short ({len(token)} chars), likely truncated in Secrets!")
         return {"error": f"Token too short: {len(token)} chars"}
+    
     if os.path.exists(str(image_path_or_url)):
         image_url = get_public_url(image_path_or_url)
     else:
         image_url = str(image_path_or_url)
+    
     print(f"Publishing with image_url={image_url}")
+    
+    # 1. Publish to Instagram
     create_url = f"{GRAPH_BASE}/{ig_user_id}/media"
     r = requests.post(create_url, data={"image_url": image_url, "caption": caption, "access_token": token}, timeout=60)
-    print(f"Create container: {r.status_code} {r.text}")
+    print(f"Create IG container: {r.status_code} {r.text}")
     data = r.json()
     if "error" in data:
-        return {"error": data["error"]}
+        return {"error": data["error"], "step": "instagram_create"}
     creation_id = data.get("id")
     if not creation_id:
         return {"error": "No creation_id", "raw": data}
+    
     time.sleep(12)
     status_url = f"{GRAPH_BASE}/{creation_id}"
     for i in range(8):
@@ -146,14 +178,31 @@ def publish_image(image_path_or_url, caption):
         if sj.get("status_code") == "FINISHED":
             break
         if sj.get("status_code") in ["ERROR", "EXPIRED"]:
-            return {"error": f"Container failed {sj}"}
+            return {"error": f"Container failed {sj}", "step": "instagram_status"}
         time.sleep(4)
+    
     pub_url = f"{GRAPH_BASE}/{ig_user_id}/media_publish"
     r2 = requests.post(pub_url, data={"creation_id": creation_id, "access_token": token}, timeout=60)
-    print(f"Publish: {r2.status_code} {r2.text}")
+    print(f"Publish IG: {r2.status_code} {r2.text}")
     res = r2.json()
+    
+    result = {}
     if "id" in res:
-        return {"success": True, "media_id": res["id"]}
-    return {"error": res}
+        result["instagram"] = {"success": True, "media_id": res["id"]}
+        print(f"✅ Instagram success: {res['id']}")
+    else:
+        result["instagram"] = {"error": res}
+        print(f"❌ Instagram failed, but continuing to Facebook...")
+    
+    # 2. Publish to Facebook Page (same image)
+    fb_result = publish_to_facebook_page(image_url, caption, fb_page_id, fb_page_token)
+    result["facebook"] = fb_result
+    
+    # Overall success if at least one succeeded
+    if result.get("instagram", {}).get("success") or result.get("facebook", {}).get("success"):
+        result["success"] = True
+        return result
+    else:
+        return {"error": result}
 
 
