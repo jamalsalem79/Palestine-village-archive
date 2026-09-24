@@ -1,68 +1,97 @@
 """
-Instagram Publisher - FIXED v4
-Fixes token parse error + fixes Unknown Image Format by using Catbox direct URLs
+Instagram Publisher - FIXED v5
+Fixes Unknown Image Format by using Imgur + GitHub Raw as host
+GitHub Actions IP is blocked by catbox and 0x0, so we push to repo itself
 """
 import os
 import time
 import requests
+import shutil
+import subprocess
 
 API_VERSION = "v21.0"
 GRAPH_BASE = f"https://graph.facebook.com/{API_VERSION}"
 
-def upload_catbox(image_path):
+def upload_imgur(image_path):
     try:
         with open(image_path, 'rb') as f:
             r = requests.post(
-                "https://catbox.moe/user/api.php",
-                data={"reqtype": "fileupload"},
-                files={"fileToUpload": f},
+                "https://api.imgur.com/3/image",
+                headers={"Authorization": "Client-ID 546c25a59c58ad7", "User-Agent": "Mozilla/5.0"},
+                files={"image": f},
+                timeout=60
+            )
+        print(f"imgur status {r.status_code} {r.text[:500]}")
+        j = r.json()
+        if j.get("success") and j.get("data", {}).get("link"):
+            return j["data"]["link"]
+    except Exception as e:
+        print(f"imgur failed: {e}")
+    return None
+
+def upload_transfer(image_path):
+    try:
+        filename = os.path.basename(image_path)
+        with open(image_path, 'rb') as f:
+            r = requests.put(
+                f"https://transfer.sh/{filename}",
+                data=f,
+                headers={"User-Agent": "Mozilla/5.0"},
                 timeout=60
             )
         url = r.text.strip()
-        print(f"catbox response: {url}")
-        if url.startswith("https://") and "catbox.moe" in url:
+        print(f"transfer.sh response: {url}")
+        if url.startswith("https://") and "transfer.sh" in url:
             return url
     except Exception as e:
-        print(f"catbox failed: {e}")
+        print(f"transfer.sh failed: {e}")
     return None
 
-def upload_0x0(image_path):
+def upload_github_raw(image_path):
+    """
+    Ultimate fallback: commit image to repo and use raw.githubusercontent.com URL
+    This URL is 100% readable by Instagram Graph API
+    """
     try:
-        with open(image_path, 'rb') as f:
-            r = requests.post("https://0x0.st", files={"file": f}, timeout=60)
-        url = r.text.strip()
-        print(f"0x0 response: {url}")
-        if url.startswith("https://"):
-            return url
-    except Exception as e:
-        print(f"0x0 failed: {e}")
-    return None
+        filename = os.path.basename(image_path)
+        dest_dir = "output"
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, filename)
+        if os.path.abspath(image_path) != os.path.abspath(dest):
+            shutil.copy(image_path, dest)
+            print(f"Copied {image_path} -> {dest}")
 
-def upload_tmpfiles(image_path):
-    try:
-        with open(image_path, 'rb') as f:
-            r = requests.post("https://tmpfiles.org/api/v1/upload", files={"file": f}, timeout=40)
-        j = r.json()
-        if j.get("status") == "success":
-            url = j["data"]["url"]
-            return url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/") if "/dl/" not in url else url
+        subprocess.run(["git", "config", "--global", "user.email", "bot@palestine.archive"], check=True)
+        subprocess.run(["git", "config", "--global", "user.name", "Archive Bot"], check=True)
+        subprocess.run(["git", "add", dest], check=True)
+        subprocess.run(["git", "commit", "-m", f"publish image {filename} {int(time.time())} [skip ci]"], check=False)
+        subprocess.run(["git", "push"], check=True)
+        print("Pushed image to GitHub")
+
+        repo = os.getenv("GITHUB_REPOSITORY", "jamalsalem79/Palestine-village-archive")
+        url = f"https://raw.githubusercontent.com/{repo}/main/{dest}?t={int(time.time())}"
+        print(f"GitHub raw URL: {url}")
+        time.sleep(3)
+        return url
     except Exception as e:
-        print(f"tmpfiles failed: {e}")
+        print(f"github raw failed: {e}")
     return None
 
 def get_public_url(image_path):
-    # Try reliable hosts first - Catbox gives direct image/jpeg which IG accepts
-    for func in [upload_catbox, upload_0x0, upload_tmpfiles]:
+    for func in [upload_imgur, upload_transfer, upload_github_raw]:
+        print(f"Trying {func.__name__}...")
         url = func(image_path)
         if url and url.startswith("http"):
             print(f"Public URL: {url}")
             try:
-                h = requests.head(url, timeout=15)
+                h = requests.head(url, timeout=15, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
                 print(f"HEAD check {h.status_code} content-type={h.headers.get('Content-Type')}")
+                if h.status_code == 200:
+                    return url
             except Exception as ex:
-                print(f"HEAD check failed: {ex}")
-            return url
-    raise Exception("All hosts failed")
+                print(f"HEAD check failed: {ex} - still trying URL anyway")
+                return url
+    raise Exception("All hosts failed - check GitHub Token permissions")
 
 def create_caption(village, index, total):
     caption = f"""{village['name_en']} - {village['name_ar']} | {village['district']} District
@@ -85,24 +114,19 @@ This archive preserves the memory of destroyed villages so they are not erased.
     return caption[:2200]
 
 def publish_image(image_path_or_url, caption):
-    # CRITICAL: strip whitespace/newlines that cause code 190 Cannot parse
     ig_user_id = (os.getenv("IG_USER_ID") or os.getenv("INSTAGRAM_USER_ID") or "").strip().strip('"').strip("'")
     token = (os.getenv("ACCESS_TOKEN") or os.getenv("INSTAGRAM_ACCESS_TOKEN") or "").strip().strip('"').strip("'")
-    
     print(f"DEBUG: IG_USER_ID length={len(ig_user_id)} value={ig_user_id[:10]}...")
     print(f"DEBUG: ACCESS_TOKEN length={len(token)} starts_with={token[:10]}...")
-    
     if not ig_user_id or not token:
         return {"dry_run": True}
     if len(token) < 50:
         print(f"ERROR: Token too short ({len(token)} chars), likely truncated in Secrets!")
         return {"error": f"Token too short: {len(token)} chars"}
-
     if os.path.exists(str(image_path_or_url)):
         image_url = get_public_url(image_path_or_url)
     else:
         image_url = str(image_path_or_url)
-
     print(f"Publishing with image_url={image_url}")
     create_url = f"{GRAPH_BASE}/{ig_user_id}/media"
     r = requests.post(create_url, data={"image_url": image_url, "caption": caption, "access_token": token}, timeout=60)
@@ -131,3 +155,5 @@ def publish_image(image_path_or_url, caption):
     if "id" in res:
         return {"success": True, "media_id": res["id"]}
     return {"error": res}
+
+

@@ -1,24 +1,28 @@
 name: Palestine Archive Daily Publisher
 
 on:
-  schedule:
-    # Every day at 08:00 UTC = 11:00 Palestine time
-    - cron: '0 8 * * *'
   workflow_dispatch:
-    inputs:
-      village_id:
-        description: 'Optional specific village ID to publish (leave empty for today auto)'
-        required: false
-        type: string
+  schedule:
+    # Daily at 06:00 UTC = 09:00 Amman
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-publisher
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -27,19 +31,29 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install requests pillow
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests Pillow
+          fi
 
       - name: Generate and Publish
         env:
-          IG_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
-          ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          INSTAGRAM_USER_ID: ${{ secrets.IG_USER_ID }}
+          INSTAGRAM_ACCESS_TOKEN: ${{ secrets.ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           python daily_bot.py
 
-      - name: Upload generated images as artifact
+      - name: Upload generated image as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: infographics
+          name: village-image
           path: output/*.jpg
-          retention-days: 7
+          if-no-files-found: ignore
+
